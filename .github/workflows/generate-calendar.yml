@@ -1,0 +1,83 @@
+name: Generate Steam Release Calendar
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: true
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    env:
+      STEAM_USER_ID: ${{ secrets.STEAM_USER_ID }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Validate required secret
+        run: |
+          if [ -z "$STEAM_USER_ID" ]; then
+            echo "::error title=Missing STEAM_USER_ID secret::Add a repository secret named STEAM_USER_ID with your numeric Steam profile ID. You can look it up at https://steamid.io/lookup and then add it in Settings > Secrets and variables > Actions > New repository secret."
+            exit 1
+          fi
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Generate iCal file
+        run: uv run steamreleasecalendar
+
+      - name: Create Pages index
+        run: |
+          cat > dist/index.html <<'EOF'
+          <!doctype html>
+          <html lang="en">
+            <head>
+              <meta charset="utf-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1">
+              <title>Steam Release Calendar</title>
+            </head>
+            <body>
+              <h1>Steam Release Calendar</h1>
+              <p><a href="steam-upcoming-releases.ics">Download the latest iCal file</a></p>
+            </body>
+          </html>
+          EOF
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: generate
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

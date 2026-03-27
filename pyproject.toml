@@ -1,0 +1,17 @@
+[project]
+name = "steamreleasecalendar"
+version = "0.1.0"
+description = "Generate an iCal file for upcoming Steam release dates from a wishlist"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+steamreleasecalendar = "steamreleasecalendar:main"
+
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = true
