@@ -23,6 +23,7 @@ The calendar file is written to `dist/steam-upcoming-releases.ics` by default.
 ## Configuration
 
 - `STEAM_USER_ID`: numeric Steam profile ID used in `/profiles/<id>/`
+- `STEAM_COUNTRY_CODE`: optional Steam storefront country code such as `de` or `us`
 - `OUTPUT_DIR`: target directory for the generated calendar, defaults to `dist`
 - `OUTPUT_FILENAME`: generated file name, defaults to `steam-upcoming-releases.ics`
 
@@ -45,6 +46,7 @@ The value should look like `76561198000000000` and goes into `STEAM_USER_ID`.
 
 - The wishlist must be public so Steam can return the data.
 - Only titles with a concrete release date on or after today are included.
+- The generator prefers Steam's explicit release-date update text when the app metadata date is stale.
 - The generated file uses all-day events for the release date.
 
 ## GitHub Actions

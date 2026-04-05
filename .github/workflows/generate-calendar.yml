@@ -22,6 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       STEAM_USER_ID: ${{ secrets.STEAM_USER_ID }}
+      STEAM_COUNTRY_CODE: de
 
     steps:
       - name: Check out repository

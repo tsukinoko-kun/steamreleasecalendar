@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import html
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from hashlib import sha256
+from html.parser import HTMLParser
 from json import JSONDecodeError
 from pathlib import Path
 from typing import Any
@@ -18,6 +21,18 @@ from urllib.request import Request, urlopen
 STEAM_WISHLIST_API_URL = "https://api.steampowered.com/IWishlistService/GetWishlist/v1/"
 STEAM_APP_DETAILS_URL = "https://store.steampowered.com/api/appdetails"
 APP_DETAILS_WORKERS = 8
+DATE_PREFIX_RE = re.compile(
+    r"^(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday),?\s+",
+    re.IGNORECASE,
+)
+ORDINAL_DAY_RE = re.compile(r"(\d{1,2})(?:st|nd|rd|th)\b", re.IGNORECASE)
+RELEASE_DATE_OVERRIDE_RE = re.compile(
+    r"moved the release date on steam.*?\bto\s+"
+    r"([A-Za-z]+,\s+\d{1,2}(?:st|nd|rd|th)?\s+[A-Za-z]+\s+\d{4}"
+    r"|\d{1,2}(?:st|nd|rd|th)?\s+[A-Za-z]+\s+\d{4}"
+    r"|[A-Za-z]+\s+\d{1,2},\s+\d{4})",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 class SteamReleaseCalendarError(RuntimeError):
@@ -27,6 +42,7 @@ class SteamReleaseCalendarError(RuntimeError):
 @dataclass(frozen=True)
 class Config:
     steam_user_id: str
+    steam_country_code: str | None
     output_dir: Path
     output_filename: str
 
@@ -74,6 +90,8 @@ def load_config() -> Config:
             "Missing STEAM_USER_ID. Set it in your environment or .env file."
         )
 
+    steam_country_code = os.getenv("STEAM_COUNTRY_CODE", "us").strip().lower() or None
+
     output_dir = Path(os.getenv("OUTPUT_DIR", "dist")).expanduser()
     output_filename = os.getenv(
         "OUTPUT_FILENAME", "steam-upcoming-releases.ics"
@@ -83,23 +101,64 @@ def load_config() -> Config:
 
     return Config(
         steam_user_id=steam_user_id,
+        steam_country_code=steam_country_code,
         output_dir=output_dir,
         output_filename=output_filename,
     )
 
 
+def normalize_release_date_text(value: str) -> str:
+    cleaned = html.unescape(value).strip()
+    cleaned = DATE_PREFIX_RE.sub("", cleaned)
+    cleaned = ORDINAL_DAY_RE.sub(r"\1", cleaned)
+    return " ".join(cleaned.split())
+
+
 def parse_release_date(value: str) -> date | None:
-    cleaned = value.strip()
+    cleaned = normalize_release_date_text(value)
     if not cleaned:
         return None
 
-    for fmt in ("%b %d, %Y", "%d %b, %Y"):
+    for fmt in (
+        "%b %d, %Y",
+        "%d %b, %Y",
+        "%B %d, %Y",
+        "%d %B, %Y",
+        "%d %B %Y",
+    ):
         try:
             return datetime.strptime(cleaned, fmt).date()
         except ValueError:
             continue
 
     return None
+
+
+class SteamDescriptionTextExtractor(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.parts: list[str] = []
+
+    def handle_data(self, data: str) -> None:
+        if data:
+            self.parts.append(data)
+
+    def get_text(self) -> str:
+        return " ".join(part.strip() for part in self.parts if part.strip())
+
+
+def extract_release_date_override(description_html: str) -> date | None:
+    if not description_html:
+        return None
+
+    parser = SteamDescriptionTextExtractor()
+    parser.feed(description_html)
+    text = parser.get_text()
+    match = RELEASE_DATE_OVERRIDE_RE.search(text)
+    if match is None:
+        return None
+
+    return parse_release_date(match.group(1))
 
 
 def fetch_wishlist_app_ids(steam_user_id: str) -> list[int]:
@@ -132,20 +191,23 @@ def fetch_wishlist_app_ids(steam_user_id: str) -> list[int]:
     return [int(item["appid"]) for item in items if "appid" in item]
 
 
-def fetch_app_details(app_id: int) -> dict[str, Any]:
-    query = urlencode(
-        {
-            "appids": str(app_id),
-            "filters": "basic,release_date",
-            "cc": "us",
-            "l": "english",
-        }
-    )
+def fetch_app_details(app_id: int, country_code: str | None) -> dict[str, Any]:
+    query_params = {
+        "appids": str(app_id),
+        "filters": "basic,release_date,detailed_description",
+        "l": "english",
+    }
+    if country_code:
+        query_params["cc"] = country_code
+
+    query = urlencode(query_params)
     url = f"{STEAM_APP_DETAILS_URL}?{query}"
     return request_json(url)
 
 
-def fetch_all_upcoming_releases(steam_user_id: str) -> list[Release]:
+def fetch_all_upcoming_releases(
+    steam_user_id: str, country_code: str | None = None
+) -> list[Release]:
     releases: list[Release] = []
     today = datetime.now(UTC).date()
 
@@ -154,7 +216,8 @@ def fetch_all_upcoming_releases(steam_user_id: str) -> list[Release]:
     try:
         with ThreadPoolExecutor(max_workers=APP_DETAILS_WORKERS) as executor:
             futures = {
-                executor.submit(fetch_app_details, app_id): app_id for app_id in app_ids
+                executor.submit(fetch_app_details, app_id, country_code): app_id
+                for app_id in app_ids
             }
 
             for future in as_completed(futures):
@@ -167,6 +230,11 @@ def fetch_all_upcoming_releases(steam_user_id: str) -> list[Release]:
                     data = item.get("data", {})
                     release_info = data.get("release_date", {})
                     release_day = parse_release_date(str(release_info.get("date", "")))
+                    description_override = extract_release_date_override(
+                        str(data.get("detailed_description", ""))
+                    )
+                    if description_override is not None:
+                        release_day = description_override
                     if release_day is None or release_day < today:
                         continue
 
@@ -271,7 +339,9 @@ def write_calendar(config: Config, calendar_text: str) -> Path:
 def main() -> int:
     try:
         config = load_config()
-        releases = fetch_all_upcoming_releases(config.steam_user_id)
+        releases = fetch_all_upcoming_releases(
+            config.steam_user_id, config.steam_country_code
+        )
         calendar_text = build_icalendar(releases, config.steam_user_id)
         output_path = write_calendar(config, calendar_text)
     except SteamReleaseCalendarError as exc:
