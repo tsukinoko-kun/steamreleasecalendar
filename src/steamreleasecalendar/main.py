@@ -308,7 +308,7 @@ def build_icalendar(releases: list[Release], steam_user_id: str) -> str:
         ).hexdigest()[:16]
         summary = escape_ical_text(f"{release.name} release")
         description = escape_ical_text(
-            f"{release.name} is scheduled to release on Steam.\\n{release.steam_url}"
+            f"{release.name} is scheduled to release on Steam.\n{release.steam_url}"
         )
         lines.extend(
             [
